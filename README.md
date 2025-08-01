@@ -3,9 +3,6 @@
 This is my undergraduate project.  
 I worked on a clinical dataset to explore associations between several health-related variables and a four-group outcome variable called `behpat` (A1, A2, B3, B4), using **Multinomial Logistic Regression** in R. 
 
-I used R for data cleaning, model building, and visualization.  
-The main goal was to find predictors associated with the outcome variable.
-
 Key steps included:
 - Data cleaning  
 - Handling missing values and detecting outliers  
