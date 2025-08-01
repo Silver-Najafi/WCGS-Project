@@ -1,0 +1,619 @@
+---
+title: "WCGS Project Report"
+author:  |
+  Noghre Najafi  
+  *Supervised by Dr. Mark Ghamsary, Professor (Retired), UCLA*
+date: "`r format(Sys.Date(), '%Y-%m-%d')`"
+output: 
+  html_document:
+    theme: cerulean
+    highlight: tango
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    number_sections: true
+bibliography: "D:/OIST/NLR/references.bib"
+csl: "D:/OIST/NLR/apa.csl"
+
+
+
+---
+
+
+
+# **Introduction**
+
+In this report, I present a statistical analysis of health-related behavioral patterns using a real-world dataset,The **Western Collaborative Group Study (WCGS)**, a prospective cohort study, recruited middle-aged men (ages 39 to 59) who were employees of 10 California companies and collected data on 3154 individuals during the years 1960-1961.  The primary outcome variable, called `behpat`, categorizes individuals into four distinct behavioral groups: A1, A2, B3, and B4.
+
+The motivation behind this analysis comes from the need to better understand how factors such as age, blood pressure, cholesterol, height, and other clinical indicators might be associated with different behavioral patterns in a medical context. To analyze the data, I used **multinomial logistic regression**, a statistical technique suitable for modeling outcomes with **more than two 'naminal' categories**. The process included data cleaning, handling missing values, identifying outliers, comparing different model structures, and evaluating predictive performance.
+
+
+
+# **Data Cleaning**
+
+## Missing Data Handling
+first I'm looking for missing data:
+
+```{r}
+
+library(haven)
+read_sav("D:/my project/WCGS.sav")
+data<-read_sav("D:/my project/WCGS1.sav")
+
+# Count number of missing values per selected variable
+vars <- c("behpat","age", "sbp", "dbp", "chol", "height", "weight")
+missing_counts <- sapply(data[vars], function(x) sum(is.na(x)))
+data_subset <- data[, vars]
+
+# Convert to data frame for table output
+missing_df <- data.frame(
+  Variable = names(missing_counts),
+  Missing_Count = missing_counts,
+  Percent = round(missing_counts / nrow(data) * 100, 2)
+)
+
+# Display table
+library(kableExtra)
+kbl(missing_df, caption = "Missing Values per Variable",
+    col.names = c("Variable", "Count", "Percent (%)")) %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover"))
+
+
+# Remove rows with any missing values
+data_clean <- na.omit(data_subset)
+
+```
+Initially, **cholesterol had 12 missing values (0.4%)**, which were removed prior to analysis and a table of missing values is shown below for clarity.
+
+## Outlier Removal
+
+- We defined outliers using the 1.5 × IQR rule, a standard approach for detecting moderate outliers.
+- For example, SBP had 15 extreme values above 180 mmHg, and cholesterol had 8 high outliers.
+- These values were removed before model fitting to prevent skewing the results.
+
+```{r}
+# Function to detect outliers using 1.5 x IQR rule
+detect_outliers <- function(x) {
+  Q1 <- quantile(x, 0.25, na.rm = TRUE)
+  Q3 <- quantile(x, 0.75, na.rm = TRUE)
+  IQR <- Q3 - Q1
+  lower_bound <- Q1 - 1.5 * IQR
+  upper_bound <- Q3 + 1.5 * IQR
+  return(which(x < lower_bound | x > upper_bound))
+}
+
+# List of continuous variables to check
+vars <- c("sbp", "dbp", "chol", "height", "weight", "age")
+
+# Detect and count outliers for each variable
+outlier_counts <- sapply(vars, function(var) {
+  idx <- detect_outliers(data_clean[[var]])
+  length(idx)
+})
+
+# Show the number of outliers per variable
+outlier_counts
+
+# Define outlier_mask (logical matrix for filtering non-outlier rows)
+outlier_mask <- sapply(vars, function(var) {
+  x <- data_clean[[var]]
+  Q1 <- quantile(x, 0.25, na.rm = TRUE)
+  Q3 <- quantile(x, 0.75, na.rm = TRUE)
+  IQR <- Q3 - Q1
+  lower_bound <- Q1 - 1.5 * IQR
+  upper_bound <- Q3 + 1.5 * IQR
+  (x >= lower_bound) & (x <= upper_bound)  # TRUE if NOT outlier
+})
+
+# Keep only rows where all numeric variables are within the normal range (no outliers)
+keep_rows <- apply(outlier_mask, 1, all)
+data_clean_final <- data_clean[keep_rows, ]
+n_before <- nrow(data_clean)
+n_after <- nrow(data_clean_final)
+cat("Number of observations removed due to outliers:", n_before - n_after)
+
+# Calculate the percentage of outliers for each variable
+outlier_percentages <- sapply(vars, function(var) {
+  total_non_missing <- sum(!is.na(data_clean[[var]]))
+  outlier_count <- length(detect_outliers(data_clean[[var]]))
+  round((outlier_count / total_non_missing) * 100, 2)
+})
+
+# Display percentages
+outlier_percentages
+
+
+```
+
+I calculated the percentage of outliers in each continuous variable using the 1.5 × IQR rule:
+
+SBP: 3.06%, DBP: 4.49%, Cholesterol: 1.59%, Height: 0.22%, Weight: 1.59%, Age: 0.00%
+
+Since the proportion of outliers is relatively low for all variables, we removed them from the dataset.
+
+'In total', I started with **3154** observations. After removing missing values and outliers, we retained **2877** clean rows for further analysis.
+
+## jitter plots
+
+To explore the distribution of each numerical variable across the outcome variable 'behpat', we used **jitter plots**. These plots help identify skewed distributions or potential need for transformation (e.g., log or scaling), especially in the context of modeling.
+```{r}
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+
+# Select relevant numeric variables
+vars <- c("age", "sbp", "dbp", "chol", "height", "weight")
+
+# Reshape data to long format for faceted plots
+data_long <- data %>%
+  select(behpat, all_of(vars)) %>%
+  pivot_longer(cols = all_of(vars), names_to = "variable", values_to = "value")
+
+# Create jitter plots for each variable across behpat categories
+ggplot(data_long, aes(x = behpat, y = value)) +
+  geom_jitter(width = 0.2, alpha = 0.4, color = "steelblue") +
+  facet_wrap(~ variable, scales = "free_y") +
+  theme_minimal() +
+  stat_summary(fun = mean, geom = "point", size = 3, color = "red") +
+  stat_summary(fun = mean, geom = "line", group = 1, color = "red") +
+  labs(title = "Jitter Plots of Numeric Variables by BEHPAT Group",
+       x = "Behavioral Pattern",
+       y = "Value")
+```
+
+These plots showed that variables like height and weight vary naturally, but their distributions are fairly symmetric and not strongly skewed. So, we did not apply any transformations at this point, though we kept these patterns in mind when choosing the final model.
+
+# **Model Building**
+
+To explore the relationship between the outcome ('behpat') and potential predictors, I used **multinomial logistic regression**.
+I adopted two model selection strategies and all models were fitted using multinomial logistic regression, as implemented in the ```multinom()``` function:
+
+## Backward Selection
+I first fit a full model including all variables of medical or statistical interest:
+
+```{r}
+library(nnet)
+model_full <- multinom(behpat ~ age + sbp + dbp + chol + height + weight, data = data_clean)
+coefs <- summary(model_full)$coefficients
+ses <- summary(model_full)$standard.errors
+z_values <- coefs / ses
+p_values <- 2 * (1 - pnorm(abs(z_values)))
+pvals_rounded <- round(p_values, 5)  
+
+# p-alues
+library(tibble)
+pval_table_only <- pvals_rounded %>%
+  as.data.frame() %>%
+  rownames_to_column("Category") %>%
+  select(Category, age, sbp, dbp, chol, height, weight)
+library(kableExtra)
+kbl(pval_table_only, caption = "P-values for Predictors in Each Outcome Group",
+    col.names = c("Group", "Age", "SBP", "DBP", "Chol", "Height", "Weight")) %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover"))
+
+
+```
+Although **weight and height** were not statistically significant (p > 0.05).
+
+## Forward Selection Based on AIC
+As a complementary approach, we also applied *forward selection*, starting from a null model and adding predictors step by step based on improvement in AIC:
+```{r}
+# Stepwise Forward Selection using AIC
+
+library(nnet)
+# Null model (intercept only)
+model_null <- multinom(behpat ~ 1, data = data_clean)
+
+model_age   <- multinom(behpat ~ age, data = data_clean)
+model_height <- multinom(behpat ~ height, data = data_clean)
+model_weight <- multinom(behpat ~ weight, data = data_clean)
+model_sbp   <- multinom(behpat ~ sbp, data = data_clean)
+model_dbp   <- multinom(behpat ~ dbp, data = data_clean)
+model_chol  <- multinom(behpat ~ chol, data = data_clean)
+
+AIC(model_null, model_age, model_height, model_weight,
+    model_sbp, model_dbp, model_chol)
+# Model 1: add age
+model_fwd1 <- multinom(behpat ~ age, data = data_clean)
+
+model_age_height <- multinom(behpat ~ age + height, data = data_clean)
+model_age_weight <- multinom(behpat ~ age + weight, data = data_clean)
+model_age_sbp    <- multinom(behpat ~ age + sbp, data = data_clean)
+model_age_dbp    <- multinom(behpat ~ age + dbp, data = data_clean)
+model_age_chol   <- multinom(behpat ~ age + chol, data = data_clean)
+
+AIC(model_fwd1, model_age_height, model_age_weight, model_age_sbp,
+    model_age_dbp, model_age_chol)
+# Model 2: add sbp
+model_fwd2 <- multinom(behpat ~ age + sbp, data = data_clean)
+
+model_age_sbp_height <- multinom(behpat ~ age + sbp + height, data = data_clean)
+model_age_sbp_weight <- multinom(behpat ~ age + sbp + weight, data = data_clean)
+model_age_sbp_dbp    <- multinom(behpat ~ age + sbp + dbp,    data = data_clean)
+model_age_sbp_chol   <- multinom(behpat ~ age + sbp + chol,   data = data_clean)
+
+AIC(model_fwd2, model_age_sbp_height, model_age_sbp_weight,
+    model_age_sbp_dbp, model_age_sbp_chol)
+# Model 3: add chol
+model_fwd3 <- multinom(behpat ~ age + sbp + chol, data = data_clean)
+
+model_age_sbp_chol_height <- multinom(behpat ~ age + sbp + chol + height, data = data_clean)
+model_age_sbp_chol_weight <- multinom(behpat ~ age + sbp + chol + weight, data = data_clean)
+model_age_sbp_chol_dbp    <- multinom(behpat ~ age + sbp + chol + dbp, data = data_clean)
+
+AIC(model_fwd3,
+    model_age_sbp_chol_height,
+    model_age_sbp_chol_weight,
+    model_age_sbp_chol_dbp)
+# Model 4: add height
+model_fwd4 <- multinom(behpat ~ age + sbp + chol + height , data = data_clean)
+
+model_age_sbp_chol_height_weight <- multinom(behpat ~ age + sbp + chol + height + weight, data = data_clean)
+model_age_sbp_chol_height_dbp    <- multinom(behpat ~ age + sbp + chol + height + dbp,    data = data_clean)
+
+AIC(model_fwd4,
+    model_age_sbp_chol_height_weight,
+    model_age_sbp_chol_height_dbp)
+# Model 5: add dbp
+model_fwd5 <- multinom(behpat ~ age + sbp + chol + height +dbp
+                       , data = data_clean)
+
+#Model 5: add weight
+model_fwd6 <- multinom(behpat ~ age + sbp+ dbp + chol 
+                        + height + weight, data = data_clean)
+
+```
+
+During forward selection, I tested different variable combinations to find the best model based on AIC. 'Weight' was the last variable that could be added to the model. Although it was not statistically significant, its inclusion did not substantially affect the AIC.
+
+## Multicollinearity
+
+I also checked for multicollinearity using the Variance Inflation Factor (VIF). All VIFs were <5, indicating no severe multicollinearity (VIF >10 is often problematic).
+```{r}
+# model_final <- multinom(behpat ~ age + sbp + dbp + chol + height + weight, data = data_clean)
+library(car)
+
+# Create a linear model with same predictors
+vif_model <- lm(age ~ sbp + dbp + chol + height + weight, data = data_clean)
+
+# Compute VIFs
+vif_values <- vif(vif_model)
+
+library(knitr)
+library(kableExtra)
+
+# Turn VIF values into data frame
+vif_table <- data.frame(VIF = round(vif_values, 2))
+
+# Create formatted table
+kable(vif_table, caption = "VIF Values in the Full Model") %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover"))
+```
+
+# **Model Comparison**
+
+To choose the final model, I compared several versions based on AIC and prediction accuracy.
+The full model included all predictors, but using stepwise methods (both backward and forward) helped identify the most important variables.
+
+During forward selection, **weight** was the last variable added. Although it wasn’t statistically significant, including it didn’t meaningfully improve AIC or prediction accuracy.
+
+In backward selection,**'weight' and 'height'** were not statistically significant either, but keeping them was beneficial. Their inclusion didn’t substantially increase AIC, but the model’s predictive performance improved with them.
+
+## Model Comparison Table
+
+```{r}
+# p-value table
+library(knitr)
+
+pval_table <- data.frame(
+  Variable = c("age", "height", "weight", "sbp", "dbp", "chol"),
+  A2 = c(1.180427e-02, 0.1115953, 0.4711732, 0.007255131, 0.01501273, 0.19427261),
+  B3 = c(9.587185e-06, 0.4365072, 0.4526394, 0.313565470, 0.07777905, 0.01870619),
+  B4 = c(5.633520e-05, 0.1792555, 0.2511721, 0.291681584, 0.08157319, 0.01435446)
+)
+
+kable(pval_table, digits = 4, caption = "P-values for each predictor across outcome levels")
+```
+
+This table shows the p-values for each predictor across outcome groups compared to the reference. Lower p-values (< 0.05) indicate significant effects. For instance, age is significant in all groups, while weight is not. This helps identify key predictors distinguishing the groups.
+
+```{r}
+library(nnet)
+library(kableExtra)
+
+# Fit different models for comparison
+model_full <- multinom(behpat ~ age + sbp + dbp + chol + height + weight, data = data_clean)
+model_no_weight <- multinom(behpat ~ age + sbp + dbp + chol + height, data = data_clean)
+model_no_height <- multinom(behpat ~ age + sbp + dbp + chol + weight, data = data_clean)
+model_no_both <- multinom(behpat ~ age + sbp + dbp + chol, data = data_clean)
+
+# Final selected model (including both weight and height)
+model_final <- model_full
+
+# Predict outcomes using each model
+pred_full <- predict(model_full)
+pred_nowt <- predict(model_no_weight)
+pred_noht <- predict(model_no_height)
+pred_noboth <- predict(model_no_both)
+pred_final <- predict(model_final)
+
+# Build a data frame to compare AIC and prediction accuracy
+model_comp <- data.frame(
+  Model = c("Full Model", "No Weight", "No Height", "No Weight & Height", "Final Model"),
+  AIC = c(AIC(model_full), AIC(model_no_weight), AIC(model_no_height), AIC(model_no_both), AIC(model_final)),
+  Accuracy = c(
+    mean(pred_full == data_clean$behpat),
+    mean(pred_nowt == data_clean$behpat),
+    mean(pred_noht == data_clean$behpat),
+    mean(pred_noboth == data_clean$behpat),
+    mean(pred_final == data_clean$behpat)
+  )
+)
+
+# Create a nicely formatted table with the final model highlighted
+model_comp %>%
+  kbl(caption = "Comparison of Models Based on AIC and Prediction Accuracy") %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover")) %>%
+  row_spec(5, background = "#d4edda")  # Highlight the Final Model row in light green
+```
+
+We evaluated multiple models to identify the best fit for predicting behavioral patterns. The Full Model, which includes all predictors (age, sbp, dbp, chol, height, weight), had an AIC of 7407.97 and an accuracy of about 44.97%. Removing weight slightly improved the AIC to 7403.13 and accuracy to 45.04%, while removing height or both height and weight did not lead to meaningful improvements.
+
+Despite these small differences, weight and height were retained in the final model due to their established clinical relevance in cardiovascular health and their minimal impact on model fit as measured by AIC. Although including these variables caused a minor drop in prediction accuracy, this trade-off was acceptable to maintain clinical interpretability and comprehensiveness.
+
+Therefore, the **Full Model** was selected for reporting, balancing statistical performance and practical significance.
+
+# **Final Model Interpretation**
+
+The final model was built using **multinomial logistic regression**, as the outcome variable `'behpat'` has four **nominal categories (A1, A2, B3, B4)**. The model compares each category to the **reference group (A1)**, and the coefficients represent changes in the *log-odds* of being in a given group versus the reference as discussed in the literature on logistic regression [@hosmer2013applied].
+
+```{r}
+#final model
+model_final <- multinom(behpat ~ age + sbp+ dbp + chol 
+                        + height + weight, data = data_clean)
+
+# Extract coefficients and standard errors from model
+coefs <- summary(model_final)$coefficients
+ses <- summary(model_final)$standard.errors
+
+# Compute z-values and p-values
+z_values <- coefs / ses
+p_values <- 2 * (1 - pnorm(abs(z_values)))
+
+# Round numbers for better display
+coefs_rounded <- round(coefs, 4)
+pvals_rounded <- round(p_values, 5)
+
+# Combine into a single tidy table
+library(tibble)
+library(dplyr)
+library(knitr)
+library(kableExtra)
+
+coef_table <- coefs_rounded %>%
+  as.data.frame() %>%
+  rownames_to_column("Category") %>%
+  mutate(p_age   = pvals_rounded[, "age"],
+         p_sbp   = pvals_rounded[, "sbp"],
+         p_dbp   = pvals_rounded[, "dbp"],
+         p_chol  = pvals_rounded[, "chol"],
+         p_height= pvals_rounded[, "height"],
+         p_weight= pvals_rounded[, "weight"]) %>%
+  select(Category, age, p_age,
+         sbp, p_sbp,
+         dbp, p_dbp,
+         chol, p_chol,
+         height, p_height,
+         weight, p_weight)
+
+# Create table
+kbl(coef_table, caption = "Estimates and P-values for the Final Multinomial Logistic Model",
+    col.names = c("Group", "Age", "p-value", "SBP", "p-value", "DBP", "p-value",
+                  "Chol", "p-value", "Height", "p-value", "Weight", "p-value")) %>%
+  kable_styling(full_width = F, bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+## Group A2 vs. A1
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+# Extract coefficients and standard errors only for group A2 vs A1
+coefs_A2 <- coefs["A2", ]
+ses_A2 <- ses["A2", ]
+
+df_A2 <- data.frame(
+  variable = names(coefs_A2),
+  estimate = coefs_A2,
+  se = ses_A2
+) %>%
+  mutate(
+    conf.low = estimate - 1.96 * se,
+    conf.high = estimate + 1.96 * se
+  )
+
+ggplot(df_A2, aes(x = estimate, y = variable)) +
+  geom_point(color = "#0072B2", size = 2) +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high), height = 0.2, color = "#0072B2") +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray50") +
+  theme_minimal(base_size = 13) +
+  labs(
+    title = "Coefficient Plot for A2 vs A1",
+    x = "Log-Odds Estimate (± 95% CI)",
+    y = "Predictors"
+  )
+
+
+```
+
+**AGE** is statistically significant in the model. Individuals in 'group A2' are approximately 2% **younger** than those in the reference 'group A1'.
+
+**SBP** is also a significant variable. Systolic blood pressure in 'group A2' is about 1% **higher** than in 'group A1'.
+
+**DBP** is statistically significant as well, showing around 2% lower values in group A2 compared to A1.
+
+Other variables, including *cholesterol, height, and weight, were not statistically significant*.
+
+## Group B3 vs. A1
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+# Extract coefficients and standard errors for group B3 vs A1
+coefs_B3 <- coefs["B3", ]
+ses_B3 <- ses["B3", ]
+
+df_B3 <- data.frame(
+  variable = names(coefs_B3),
+  estimate = coefs_B3,
+  se = ses_B3
+) %>%
+  mutate(
+    conf.low = estimate - 1.96 * se,
+    conf.high = estimate + 1.96 * se
+  )
+
+ggplot(df_B3, aes(x = estimate, y = variable)) +
+  geom_point(color = "#D55E00", size = 2) +          # Different color to distinguish groups
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high), height = 0.2, color = "#D55E00") +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray50") +
+  theme_minimal(base_size = 13) +
+  labs(
+    title = "Coefficient Plot for B3 vs A1",
+    x = "Log-Odds Estimate (± 95% CI)",
+    y = "Predictors"
+  )
+```
+
+**AGE** is statistically significant in this model. Individuals in 'group B3' are approximately 5% **younger** than those in the reference'group A1'.
+
+**Cholesterol** is also statistically significant in this comparison, with individuals in 'group B3' showing about 3% **lower** cholesterol levels compared to 'group A1'.
+
+**DBP** is close to the threshold of significance and is about 2% **lower** in 'group B3' than in 'group A1'.
+
+Other variables, including *SBP, height, and weight, were not statistically significant*.
+
+## Group B4 vs. A1
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+# Extract coefficients and standard errors for group B4 vs A1
+coefs_B4 <- coefs["B4", ]
+ses_B4 <- ses["B4", ]
+
+df_B4 <- data.frame(
+  variable = names(coefs_B4),
+  estimate = coefs_B4,
+  se = ses_B4
+) %>%
+  mutate(
+    conf.low = estimate - 1.96 * se,
+    conf.high = estimate + 1.96 * se
+  )
+
+ggplot(df_B4, aes(x = estimate, y = variable)) +
+  geom_point(color = "#0072B2", size = 2) +          # Different color for B4
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high), height = 0.2, color = "#0072B2") +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray50") +
+  theme_minimal(base_size = 13) +
+  labs(
+    title = "Coefficient Plot for B4 vs A1",
+    x = "Log-Odds Estimate (± 95% CI)",
+    y = "Predictors"
+  )
+```
+**AGE** is statistically significant. Individuals in 'group B4' are about 6% **younger** than those in the reference 'group A1'.
+
+**Height** is statistically significant as well, with individuals in group B4 being about 2.2% **shorter** than those in group A1.
+
+Although **Cholesterol** is statistically significant, the actual difference between 'group B4 and A1' is small and may not be clinically meaningful.
+
+**DBP** is near the significance threshold and is roughly 2.4% **lower** in' group B4 than in A1'.
+
+Variables such as 'SBP and weight were not statistically significant'.
+
+# **Model Evaluation**
+
+We evaluated the model's predictive performance using a confusion matrix:
+
+```{r conf_matrix_heatmap, echo=TRUE, message=FALSE, warning=FALSE}
+# Confusion matrix heatmap
+conf_table <- table(Predicted = pred_final, Actual = data_clean$behpat)
+conf_df <- as.data.frame(conf_table)
+
+library(ggplot2)
+ggplot(conf_df, aes(x = Actual, y = Predicted, fill = Freq)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Freq), size = 5) +
+  scale_fill_gradient(low = "lightblue", high = "darkblue") +
+  labs(title = "Confusion Matrix Heatmap",
+       x = "Actual Class",
+       y = "Predicted Class",
+       fill = "Count") +
+  theme_minimal()
+
+table(data_clean$behpat)
+```
+
+The heatmap above illustrates the model’s performance in classifying different outcome categories. As shown, the model only made predictions for classes A2 and B3, and failed to predict any cases as A1 or B4.
+
+The highest number of correct predictions occurred in class A2, with 889 cases accurately classified. Class B3 followed with 524 correct predictions. However, there was a considerable amount of misclassification between A2 and B3 — for example, 686 B3 cases were incorrectly predicted as A2, and 432 A2 cases were predicted as B3.
+
+This pattern suggests that while the model performs reasonably well in distinguishing between A2 and B3, it completely fails to recognize classes A1 and B4. This issue may stem from class imbalance or overlapping feature distributions between classes.
+
+# **Conclusion**
+
+In this project, I applied **multinomial logistic regression** to model the relationship between several health-related predictors and the outcome variable 'behpat', which includes four **nominal categories (A1, A2, B3, B4)**.
+
+I evaluated different model-building strategies, including both **forward** and **backward selection**, using criteria such as **AIC**, **prediction accuracy**, and **statistical significance** of predictors.
+
+The final model included **age, SBP, DBP, cholesterol, height** and **weight**. While variables like **weight** and **height** were not statistically significant, we chose to retain them due to their potential medical relevance and their contribution to the model's overall predictive performance.
+
+The interpretation of coefficients showed that **age, SBP, DBP** and **cholesterol** played important roles in distinguishing between outcome categories:
+
+**Age**: Younger age was consistently associated with groups A2, B3, and B4 compared to the reference group A1.
+
+**Diastolic Blood Pressure (DBP)**: Lower DBP was also linked to groups A2, B3, and B4 versus A1.
+
+**Systolic Blood Pressure (SBP)**: Showed some variation across groups but was less consistent.
+
+**Cholesterol**: Played a role in distinguishing groups B3 and B4 from A1.
+
+**Height and Weight**: These variables were included due to their clinical importance but showed less strong associations.
+ 
+These insights can help inform future studies or screening strategies targeting cardiovascular or behavioral health risks.
+
+# **Limitations**
+
+Although the model helped us understand the differences between behavior pattern groups, there are some important limitations to mention:
+
+**Baseline Data Only**: Even though the dataset comes from a cohort study, we only used the baseline data. This means we can't track how things change over time or say much about cause and effect.
+
+**Moderate Accuracy**: The model’s prediction accuracy was around 45%, which suggests that other important factors—ones we didn’t include—might also affect group membership.
+
+**Missing Lifestyle Factors**: Variables like diet, physical activity, stress, and income level were not available. These might explain more about the behavior patterns.
+
+**Possible Measurement Issues**: Some variables, like blood pressure and cholesterol, may not be perfectly measured, which could affect the results.
+
+**Uneven Group Sizes**: Some behavior groups had fewer people than others (for example, B4 vs. A1), which may have made it harder for the model to detect real differences.
+
+# **Code & Technical Notes**
+
+- The analysis was performed using R version 4.3.1.
+- Main packages: `nnet`, `dplyr`, `ggplot2`, `knitr`, `kableExtra`.
+- The multinomial logistic regression model was fitted using the `multinom()` function from the `nnet` package.
+- All data cleaning and variable transformation steps were done using `dplyr`.
+- Tables were generated using `knitr::kable()` for clean markdown display.
+- The dataset was derived from a cohort study, but only baseline values were used in this analysis.
+
+# References
+
+
+
+
+ 
+
